@@ -34,6 +34,13 @@ class TicketPriority(str, Enum):
     LOW = "Low"
 
 
+class Confidence(str, Enum):
+    """Shared confidence/risk level used by RCA and Predictive Risk agents."""
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
 # --- Agent I/O Models ---
 
 class LogEntry(BaseModel):
@@ -77,6 +84,34 @@ class SlackNotification(BaseModel):
     mode: str = Field(default="dry-run", description="'live' or 'dry-run'")
 
 
+class ChainEvent(BaseModel):
+    """A single event in a causal chain."""
+    service: str = Field(description="Service/component name")
+    event: str = Field(description="Description of what happened")
+    timestamp: str = Field(default="", description="When it happened")
+    line_number: int = Field(default=0, description="Source log line number")
+
+
+class CausalChain(BaseModel):
+    """A directed causal chain linking related failure events."""
+    chain: list[ChainEvent] = Field(default_factory=list, description="Ordered events in the chain")
+    root_cause: str = Field(description="The originating event description")
+    blast_radius: int = Field(default=0, description="Number of affected services")
+    affected_services: list[str] = Field(default_factory=list, description="Service names impacted")
+    confidence: Confidence = Field(default=Confidence.MEDIUM, description="Confidence level")
+    summary: str = Field(description="One-sentence explanation of the causal chain")
+
+
+class RiskPrediction(BaseModel):
+    """A predicted escalation risk for a service."""
+    service: str = Field(description="Affected service name")
+    risk_level: Confidence = Field(description="Risk level (HIGH/MEDIUM/LOW)")
+    prediction: str = Field(description="What is likely to happen next")
+    evidence: list[str] = Field(default_factory=list, description="Supporting log patterns")
+    preventive_action: str = Field(description="Recommended action to prevent escalation")
+    time_horizon: str = Field(default="unknown", description="Estimated urgency")
+
+
 # --- LangGraph Pipeline State ---
 
 def merge_lists(left: list, right: list) -> list:
@@ -93,5 +128,7 @@ class PipelineState(BaseModel):
     cookbook: str = ""
     jira_tickets: list[JiraTicket] = Field(default_factory=list)
     notification: SlackNotification | None = None
+    causal_chains: list[CausalChain] = Field(default_factory=list)
+    risk_predictions: list[RiskPrediction] = Field(default_factory=list)
     current_agent: str = ""
     error: str = ""

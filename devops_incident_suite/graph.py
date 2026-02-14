@@ -9,7 +9,10 @@ from typing import Annotated, Any, TypedDict
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 
-from agents import log_classifier, remediation, cookbook, jira_ticket, notification
+from agents import (
+    log_classifier, remediation, cookbook, jira_ticket, notification,
+    root_cause, predictive_risk,
+)
 
 
 load_dotenv()
@@ -35,6 +38,8 @@ class PipelineState(TypedDict):
     cookbook: Annotated[str, _last_value]
     jira_tickets: Annotated[list, _merge_lists]
     notification: Annotated[Any, _last_value]
+    causal_chains: Annotated[list, _merge_lists]
+    risk_predictions: Annotated[list, _merge_lists]
     current_agent: Annotated[str, _last_value]
     error: Annotated[str, _last_value]
 
@@ -108,13 +113,25 @@ def notification_node(state: dict) -> dict:
     return notification.run(state, _get_shared_llm())
 
 
+def root_cause_node(state: dict) -> dict:
+    return root_cause.run(state, _get_shared_llm())
+
+
+def predictive_risk_node(state: dict) -> dict:
+    return predictive_risk.run(state, _get_shared_llm())
+
+
 # --- Graph Definition ---
 
 def build_graph() -> StateGraph:
     """Build and compile the LangGraph pipeline.
 
     Flow:
-        log_classifier → remediation → [cookbook, jira_ticket, notification] (parallel) → END
+        log_classifier → remediation → [cookbook, jira_ticket, root_cause, predictive_risk] (parallel)
+                                        cookbook ──────────→ END
+                                        jira_ticket ──────→ END
+                                        root_cause ───────→ END
+                                        predictive_risk ──→ notification → END
     """
     graph = StateGraph(PipelineState)
 
@@ -123,20 +140,27 @@ def build_graph() -> StateGraph:
     graph.add_node("remediation", remediation_node)
     graph.add_node("cookbook", cookbook_node)
     graph.add_node("jira_ticket", jira_ticket_node)
+    graph.add_node("root_cause", root_cause_node)
+    graph.add_node("predictive_risk", predictive_risk_node)
     graph.add_node("notification", notification_node)
 
     # Define edges: sequential then fan-out
     graph.set_entry_point("log_classifier")
     graph.add_edge("log_classifier", "remediation")
 
-    # Fan-out from remediation to three parallel agents
+    # Fan-out from remediation to four parallel agents
     graph.add_edge("remediation", "cookbook")
     graph.add_edge("remediation", "jira_ticket")
-    graph.add_edge("remediation", "notification")
+    graph.add_edge("remediation", "root_cause")
+    graph.add_edge("remediation", "predictive_risk")
 
-    # All three converge to END
+    # Notification runs after predictive_risk (needs risk predictions for Slack)
+    graph.add_edge("predictive_risk", "notification")
+
+    # All converge to END
     graph.add_edge("cookbook", END)
     graph.add_edge("jira_ticket", END)
+    graph.add_edge("root_cause", END)
     graph.add_edge("notification", END)
 
     return graph.compile()
@@ -156,6 +180,8 @@ def run_pipeline(raw_logs: str, file_name: str = "upload") -> dict:
         "cookbook": "",
         "jira_tickets": [],
         "notification": None,
+        "causal_chains": [],
+        "risk_predictions": [],
         "current_agent": "",
         "error": "",
     }

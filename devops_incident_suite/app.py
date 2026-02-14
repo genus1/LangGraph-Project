@@ -111,7 +111,7 @@ if raw_logs and st.button("Analyze Logs", type="primary"):
     start_time = time.time()
 
     progress.progress(10, text="Running Log Classifier Agent...")
-    status_container.info("Agent 1/5: Log Reader/Classifier is parsing your logs...")
+    status_container.info("Agent 1/7: Log Reader/Classifier is parsing your logs...")
 
     try:
         result = run_pipeline(raw_logs, file_name)
@@ -136,20 +136,26 @@ if "result" in st.session_state:
     issues = result.get("issues", [])
     jira_tickets = result.get("jira_tickets", [])
     notification = result.get("notification")
+    causal_chains = result.get("causal_chains", [])
+    risk_predictions = result.get("risk_predictions", [])
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Log Entries Parsed", len(log_entries))
-    col2.metric("Issues Detected", len(issues))
-    col3.metric("JIRA Tickets", len(jira_tickets))
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1.metric("Log Entries", len(log_entries))
+    col2.metric("Issues", len(issues))
+    col3.metric("Causal Chains", len(causal_chains))
+    col4.metric("Risk Predictions", len(risk_predictions))
+    col5.metric("JIRA Tickets", len(jira_tickets))
     notify_status = "Sent" if notification and notification.get("sent") else "Dry Run"
-    col4.metric("Notification", notify_status)
+    col6.metric("Notification", notify_status)
 
     st.divider()
 
     # Tabbed output
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Log Entries",
         "Issues & Remediation",
+        "Root Cause Analysis",
+        "Risk Forecast",
         "Remediation Cookbook",
         "JIRA Tickets",
         "Slack Notification",
@@ -194,8 +200,68 @@ if "result" in st.session_state:
         else:
             st.success("No actionable issues detected.")
 
-    # Tab 3: Cookbook
+    # Tab 3: Root Cause Analysis
     with tab3:
+        st.subheader("Root Cause Analysis")
+        if causal_chains:
+            for i, chain in enumerate(causal_chains, 1):
+                confidence = chain.get("confidence", "MEDIUM")
+                conf_color = {"HIGH": "green", "MEDIUM": "orange", "LOW": "gray"}.get(confidence, "gray")
+                blast = chain.get("blast_radius", 0)
+                affected = chain.get("affected_services", [])
+
+                with st.expander(
+                    f"Chain {i}: {chain.get('summary', 'Unknown')} — :{conf_color}[{confidence}]",
+                    expanded=(confidence == "HIGH"),
+                ):
+                    st.markdown(f"**Root Cause:** {chain.get('root_cause', 'Unknown')}")
+                    st.markdown(f"**Blast Radius:** {blast} service{'s' if blast != 1 else ''} affected — {', '.join(affected)}")
+
+                    # Display chain as flow
+                    events = chain.get("chain", [])
+                    if events:
+                        st.markdown("**Causal Flow:**")
+                        for j, evt in enumerate(events):
+                            prefix = "**>>**" if j == 0 else "&nbsp;&nbsp;&nbsp;&nbsp;**->**"
+                            line_ref = f" (line {evt.get('line_number')})" if evt.get("line_number") else ""
+                            st.markdown(
+                                f"{prefix} **[{evt.get('service', '?')}]** "
+                                f"{evt.get('event', '')}"
+                                f" `{evt.get('timestamp', '')}`{line_ref}"
+                            )
+        else:
+            st.info("No causal chains detected — issues may be independent.")
+
+    # Tab 4: Risk Forecast
+    with tab4:
+        st.subheader("Risk Forecast")
+        if risk_predictions:
+            risk_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+            sorted_preds = sorted(risk_predictions, key=lambda r: risk_order.get(r.get("risk_level", "LOW"), 3))
+
+            for pred in sorted_preds:
+                risk = pred.get("risk_level", "MEDIUM")
+                risk_color = {"HIGH": "red", "MEDIUM": "orange", "LOW": "yellow"}.get(risk, "gray")
+                risk_icon = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡"}.get(risk, "⚪")
+
+                with st.expander(
+                    f"{risk_icon} [{risk}] {pred.get('service', 'Unknown')} — {pred.get('prediction', '')[:80]}",
+                    expanded=(risk == "HIGH"),
+                ):
+                    st.markdown(f"**Prediction:** {pred.get('prediction', 'N/A')}")
+                    st.markdown(f"**Preventive Action:** {pred.get('preventive_action', 'N/A')}")
+                    st.markdown(f"**Time Horizon:** `{pred.get('time_horizon', 'unknown')}`")
+
+                    evidence = pred.get("evidence", [])
+                    if evidence:
+                        st.markdown("**Evidence:**")
+                        for ev in evidence:
+                            st.markdown(f"- {ev}")
+        else:
+            st.success("No escalation risks detected.")
+
+    # Tab 5: Cookbook
+    with tab5:
         st.subheader("Remediation Cookbook")
         cookbook = result.get("cookbook", "")
         if cookbook:
@@ -203,8 +269,8 @@ if "result" in st.session_state:
         else:
             st.info("No cookbook generated.")
 
-    # Tab 4: JIRA Tickets
-    with tab4:
+    # Tab 6: JIRA Tickets
+    with tab6:
         st.subheader("Generated JIRA Tickets")
         if jira_tickets:
             for i, ticket in enumerate(jira_tickets, 1):
@@ -222,8 +288,8 @@ if "result" in st.session_state:
         else:
             st.info("No tickets generated (only CRITICAL/HIGH issues produce tickets).")
 
-    # Tab 5: Notification
-    with tab5:
+    # Tab 7: Notification
+    with tab7:
         st.subheader("Slack Notification")
         if notification:
             mode = notification.get("mode", "dry-run")

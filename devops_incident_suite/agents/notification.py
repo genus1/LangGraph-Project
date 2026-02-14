@@ -26,6 +26,7 @@ Format the message for Slack using markdown:
 - Keep each issue and its details compact — no blank line between an issue title and its details
 - Put a blank line between separate issues for readability
 - Include a link placeholder for the full cookbook
+- If risk predictions are provided, add a "Risk Forecast" section after the issues listing the HIGH-risk predictions with their preventive actions
 - Keep it scannable — ops engineers are busy
 
 Return ONLY the notification text (Slack markdown). No JSON wrapping.
@@ -49,11 +50,15 @@ def run(state: dict, llm) -> dict:
             "current_agent": "notification",
         }
 
-    context = json.dumps(
-        {"issues": issues, "cookbook_preview": cookbook[:500]},
-        indent=2,
-        default=str,
-    )
+    # Include HIGH risk predictions if available
+    risk_predictions = state.get("risk_predictions", [])
+    high_risks = [r for r in risk_predictions if r.get("risk_level") == "HIGH"]
+
+    context_data = {"issues": issues, "cookbook_preview": cookbook[:500]}
+    if high_risks:
+        context_data["risk_predictions"] = high_risks
+
+    context = json.dumps(context_data, indent=2, default=str)
 
     response = llm.invoke([
         SystemMessage(content=SYSTEM_PROMPT),
