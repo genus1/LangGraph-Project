@@ -22,6 +22,9 @@ build/
 # Live watcher processed files
 devops_incident_suite/live_logs/processed/
 
+# Results history (persisted pipeline results)
+devops_incident_suite/results_history/*.json
+
 # OS
 .DS_Store
 Thumbs.db

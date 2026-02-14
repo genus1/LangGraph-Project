@@ -72,6 +72,10 @@ def _process_file(file_path: str, processed_dir: str) -> dict | None:
     dest_path = os.path.join(processed_dir, fname)
     shutil.move(file_path, dest_path)
 
+    # Also save to results_history for the dashboard
+    from utils.results_store import save_result
+    save_result(output, fname, source="watcher")
+
     return output
 
 

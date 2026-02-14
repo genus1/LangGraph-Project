@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import sys
 import os
-import json
 import threading
 import time
+from datetime import date, timedelta
 
 import streamlit as st
 
@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from graph import run_pipeline
 from models.schemas import Severity
 from utils.watcher import start_watcher, stop_watcher
+from utils.results_store import save_result, load_results, SEVERITY_ORDER
 
 
 # --- Page Config ---
@@ -129,13 +130,16 @@ uploaded_file = st.file_uploader(
 # Determine which content to analyze
 raw_logs = None
 file_name = None
+_source = None
 
 if uploaded_file is not None:
     raw_logs = uploaded_file.read().decode("utf-8", errors="replace")
     file_name = uploaded_file.name
+    _source = "upload"
 elif "sample_content" in st.session_state:
     raw_logs = st.session_state["sample_content"]
     file_name = st.session_state.get("sample_name", "sample.log")
+    _source = "sample"
     st.info(f"Using sample log: {file_name}")
 
 
@@ -165,13 +169,111 @@ if raw_logs and st.button("Analyze Logs", type="primary"):
     progress.progress(100, text="Analysis complete!")
     status_container.success(f"All agents completed in {elapsed:.1f}s")
 
+    # Auto-save result to history
+    result["processing_time_seconds"] = round(elapsed, 2)
+    result["filename"] = file_name
+    save_result(result, file_name, source=_source or "upload")
+
     # Store results
     st.session_state["result"] = result
+
+
+# --- Incidents Dashboard ---
+
+st.divider()
+st.subheader("Incidents Dashboard")
+
+_today = date.today()
+_default_from = _today - timedelta(days=3)
+_min_date = _today - timedelta(days=30)
+
+dcol1, dcol2 = st.columns(2)
+with dcol1:
+    from_date = st.date_input("From", value=_default_from, min_value=_min_date, max_value=_today)
+with dcol2:
+    to_date = st.date_input("To", value=_today, min_value=_min_date, max_value=_today)
+
+# Load and display filtered results
+dashboard_results = load_results(from_date, to_date)
+
+# Summary metrics
+total_incidents = len(dashboard_results)
+total_issues = sum(len(r.get("issues", [])) for r in dashboard_results)
+total_crit_high = sum(
+    1 for r in dashboard_results
+    for issue in r.get("issues", [])
+    if issue.get("severity") in ("CRITICAL", "HIGH")
+)
+total_chains = sum(len(r.get("causal_chains", [])) for r in dashboard_results)
+
+mc1, mc2, mc3, mc4 = st.columns(4)
+mc1.metric("Total Incidents", total_incidents)
+mc2.metric("Total Issues", total_issues)
+mc3.metric("CRITICAL / HIGH", total_crit_high)
+mc4.metric("Causal Chains", total_chains)
+
+# Incident rows
+if dashboard_results:
+    for idx, dr in enumerate(dashboard_results):
+        fname = dr.get("filename", "unknown")
+        processed_at = dr.get("processed_at", "unknown")
+        source = dr.get("source", "unknown")
+        n_issues = len(dr.get("issues", []))
+        n_chains = len(dr.get("causal_chains", []))
+        n_risks = len(dr.get("risk_predictions", []))
+        proc_time = dr.get("processing_time_seconds", "?")
+
+        # Highest severity
+        issues = dr.get("issues", [])
+        highest = min(
+            (i.get("severity", "LOW") for i in issues),
+            key=lambda s: SEVERITY_ORDER.get(s, 4),
+            default=None,
+        )
+
+        sev_icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(highest, "⚪")
+        source_badge = {"upload": "upload", "sample": "sample", "watcher": "watcher"}.get(source, source)
+
+        # Format timestamp for display
+        display_time = processed_at[:19].replace("T", " ") if len(processed_at) >= 19 else processed_at
+
+        # Only expand the currently loaded incident
+        is_loaded = (
+            "result" in st.session_state
+            and st.session_state["result"].get("filename") == fname
+            and st.session_state["result"].get("processed_at") == processed_at
+        )
+
+        with st.expander(f"{sev_icon} **{fname}** — {display_time} — `{source_badge}`", expanded=is_loaded):
+            st.markdown(
+                f"**Issues:** {n_issues} | "
+                f"**Causal Chains:** {n_chains} | "
+                f"**Risk Predictions:** {n_risks} | "
+                f"**Processing Time:** {proc_time}s"
+            )
+
+            # Severity distribution
+            sev_counts = {}
+            for issue in issues:
+                s = issue.get("severity", "LOW")
+                sev_counts[s] = sev_counts.get(s, 0) + 1
+            if sev_counts:
+                dist_parts = [f"{k}: {v}" for k, v in sorted(sev_counts.items(), key=lambda x: SEVERITY_ORDER.get(x[0], 4))]
+                st.caption(f"Severity breakdown: {' | '.join(dist_parts)}")
+
+            if st.button("Load Full Results", key=f"dash_load_{idx}"):
+                st.session_state["result"] = dr
+                st.rerun()
+else:
+    st.info("No incidents found in the selected date range.")
+
 
 # --- Display Results ---
 
 if "result" in st.session_state:
     result = st.session_state["result"]
+
+    st.divider()
 
     # Summary metrics
     log_entries = result.get("log_entries", [])
@@ -192,8 +294,8 @@ if "result" in st.session_state:
 
     st.divider()
 
-    # Tabbed output
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    # Tabbed output — 7 tabs (Live Results tab removed)
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Log Entries",
         "Issues & Remediation",
         "Root Cause Analysis",
@@ -201,7 +303,6 @@ if "result" in st.session_state:
         "Remediation Cookbook",
         "JIRA Tickets",
         "Slack Notification",
-        "Live Results",
     ])
 
     # Tab 1: Log Entries
@@ -350,50 +451,6 @@ if "result" in st.session_state:
                 st.json(notification.get("payload", {}))
         else:
             st.info("No notification generated.")
-
-    # Tab 8: Live Results
-    with tab8:
-        st.subheader("Live Results")
-
-        _app_dir_t = os.path.dirname(os.path.abspath(__file__))
-        _processed_dir_t = os.path.join(_app_dir_t, "live_logs", "processed")
-
-        if st.button("Refresh", key="refresh_live"):
-            pass  # Streamlit reruns on button click — re-scans below
-
-        if os.path.isdir(_processed_dir_t):
-            result_files = sorted(
-                [f for f in os.listdir(_processed_dir_t) if f.endswith(".results.json")],
-                key=lambda f: os.path.getmtime(os.path.join(_processed_dir_t, f)),
-                reverse=True,
-            )
-        else:
-            result_files = []
-
-        if result_files:
-            for rf in result_files:
-                rf_path = os.path.join(_processed_dir_t, rf)
-                with open(rf_path, "r", encoding="utf-8") as fh:
-                    lr = json.load(fh)
-
-                fname = lr.get("filename", rf)
-                processed_at = lr.get("processed_at", "unknown")
-                n_issues = len(lr.get("issues", []))
-                n_chains = len(lr.get("causal_chains", []))
-                n_risks = len(lr.get("risk_predictions", []))
-
-                with st.expander(f"{fname} — {processed_at}"):
-                    st.markdown(
-                        f"**Issues:** {n_issues} | "
-                        f"**Causal Chains:** {n_chains} | "
-                        f"**Risk Predictions:** {n_risks} | "
-                        f"**Processing Time:** {lr.get('processing_time_seconds', '?')}s"
-                    )
-                    if st.button("Load Full Results", key=f"load_{rf}"):
-                        st.session_state["result"] = lr
-                        st.rerun()
-        else:
-            st.info("No live-processed results yet. Enable the watcher and drop a log file into live_logs/.")
 
     # Error display
     if result.get("error"):
